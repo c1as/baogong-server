@@ -38,7 +38,7 @@ import androidx.core.content.FileProvider;
 
 import com.baogong.server.installer.AssetInstaller;
 import com.baogong.server.installer.HotUpdateImporter;
-import com.baogong.server.updater.GitLabReleaseClient;
+import com.baogong.server.updater.GitHubReleaseClient;
 import com.baogong.server.updater.RepoUpdater;
 import com.baogong.server.updater.UpdateConfig;
 
@@ -541,9 +541,8 @@ public class MainActivity extends Activity implements ServerService.StateListene
     /** v2.1 新增「设置」：以对话框集中展示配置项与快捷入口。
      *  Web 识别插件等设置请在页面内的设置界面操作；这里放 App 级设置与说明。 */
     private void showSettings() {
-        String updateStatus = UpdateConfig.isConfigured(this)
-                ? "已配置（项目 " + UpdateConfig.getProjectId(this) + "）"
-                : "未配置";
+        String updateStatus = "GitHub " + UpdateConfig.getRepoLabel(this)
+                + (UpdateConfig.getToken(this).isEmpty() ? "（匿名）" : "（带令牌）");
         new AlertDialog.Builder(this)
                 .setTitle("设置")
                 .setMessage("服务器地址：" + phpText() + "\n"
@@ -558,50 +557,52 @@ public class MainActivity extends Activity implements ServerService.StateListene
                 .show();
     }
 
-    /** 服务端更新配置：运行时填写 API 地址/项目ID/令牌，保存到私有存储，随时可改。 */
+    /** 服务端更新配置：运行时填写 GitHub 仓库/令牌，保存到私有存储，随时可改。 */
     private void showUpdateConfig() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
         box.setPadding(pad, pad, pad, 0);
 
-        final EditText apiInput = new EditText(this);
-        apiInput.setHint("API 地址（默认 https://jihulab.com/api/v4）");
-        apiInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        apiInput.setText(UpdateConfig.getApiBase(this));
-        box.addView(apiInput);
+        final EditText ownerInput = new EditText(this);
+        ownerInput.setHint("仓库所有者（默认 c1as）");
+        ownerInput.setText(UpdateConfig.getOwner(this));
+        box.addView(ownerInput);
 
-        final EditText pidInput = new EditText(this);
-        pidInput.setHint("项目 ID（纯数字，如 389585）");
-        pidInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        pidInput.setText(UpdateConfig.getProjectId(this));
-        box.addView(pidInput);
+        final EditText repoInput = new EditText(this);
+        repoInput.setHint("仓库名（默认 baogong-system）");
+        repoInput.setText(UpdateConfig.getRepo(this));
+        box.addView(repoInput);
 
         final EditText tokenInput = new EditText(this);
-        tokenInput.setHint("只读令牌（只勾 read_repository 的 PAT）");
+        tokenInput.setHint("令牌（可选，公开仓库留空即可）");
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         tokenInput.setText(UpdateConfig.getToken(this));
         box.addView(tokenInput);
 
         new AlertDialog.Builder(this)
-                .setTitle("服务端更新配置")
-                .setMessage("填写后可用菜单「检查服务端更新」从 GitLab 仓库拉取服务端程序。"
-                        + "\n\n令牌只保存在本机 App 内，不会打包进安装包；过期或泄露可随时回来修改。"
-                        + "\n令牌权限只需 read_repository（只读）。")
+                .setTitle("服务端更新配置（GitHub）")
+                .setMessage("用菜单「检查服务端更新」从 GitHub Releases 拉取服务端程序，可选任意版本。"
+                        + "\n\n公开仓库无需令牌即可使用；留空即匿名访问。"
+                        + "如需提高限额或访问私有仓库，可填 GitHub 令牌（勾 public_repo / repo 只读）。"
+                        + "\n令牌只保存在本机 App 内，不会打包进安装包，可随时回来修改。")
                 .setView(box)
                 .setPositiveButton("保存", (d, w) -> {
-                    UpdateConfig.save(this, apiInput.getText().toString(),
-                            pidInput.getText().toString(), tokenInput.getText().toString());
+                    UpdateConfig.save(this,
+                            UpdateConfig.DEFAULT_API_BASE,
+                            ownerInput.getText().toString(),
+                            repoInput.getText().toString(),
+                            tokenInput.getText().toString());
                     Toast.makeText(this, "配置已保存", Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("取消", null)
                 .show();
     }
 
-    /** 检查服务端更新：后台查 Release → 比对版本 → 提示 → 下载覆盖。 */
+    /** 检查服务端更新：后台拉取所有可下载版本 → 弹出列表供选择（可回退） → 下载覆盖。 */
     private void checkServerUpdate() {
         if (!UpdateConfig.isConfigured(this)) {
-            Toast.makeText(this, "请先在「设置 → 服务端更新配置」填写项目ID和令牌", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "请先在「设置 → 服务端更新配置」填写 GitHub 仓库", Toast.LENGTH_LONG).show();
             showUpdateConfig();
             return;
         }
@@ -609,38 +610,63 @@ public class MainActivity extends Activity implements ServerService.StateListene
             Toast.makeText(this, "正在更新中，请稍候", Toast.LENGTH_SHORT).show();
             return;
         }
-        Toast.makeText(this, "正在检查服务端更新…", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "正在获取版本列表…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
-                GitLabReleaseClient.Release latest = GitLabReleaseClient.fetchLatest(this);
-                String installed = UpdateConfig.getInstalledWebVersion(this);
-                uiHandler.post(() -> {
-                    String cur = installed.isEmpty() ? "未知" : installed;
-                    if (latest.tag.equalsIgnoreCase(installed)) {
-                        new AlertDialog.Builder(this).setTitle("已是最新")
-                                .setMessage("当前服务端程序：" + cur + "\n仓库最新版本：" + latest.tag
-                                        + "\n\n无需更新。")
-                                .setPositiveButton("知道了", null).show();
-                    } else {
-                        new AlertDialog.Builder(this).setTitle("发现新版本")
-                                .setMessage("当前服务端程序：" + cur + "\n仓库最新版本：" + latest.tag
-                                        + "\n\n更新只覆盖程序（public/），你的数据（data/）不会丢失。"
-                                        + "\n是否立即下载并更新？")
-                                .setPositiveButton("立即更新", (d, w) -> applyServerUpdate(latest))
-                                .setNegativeButton("稍后", null).show();
-                    }
-                });
+                final java.util.List<GitHubReleaseClient.Release> releases =
+                        GitHubReleaseClient.fetchReleases(this);
+                uiHandler.post(() -> showVersionPicker(releases));
             } catch (Exception e) {
                 String msg = e.getMessage() == null ? "未知错误" : e.getMessage();
-                uiHandler.post(() -> new AlertDialog.Builder(this).setTitle("检查更新失败")
-                        .setMessage(msg + "\n\n请检查网络、项目ID与令牌是否正确（令牌需 read_repository 权限）。")
+                uiHandler.post(() -> new AlertDialog.Builder(this).setTitle("获取版本失败")
+                        .setMessage(msg)
                         .setPositiveButton("知道了", null).show());
             }
         }).start();
     }
 
+    /** 弹出版本选择列表：标注当前已装版本与最新，点击任一版本即下载覆盖（可回退旧版）。 */
+    private void showVersionPicker(final java.util.List<GitHubReleaseClient.Release> releases) {
+        String installed = UpdateConfig.getInstalledWebVersion(this);
+        final String[] labels = new String[releases.size()];
+        for (int i = 0; i < releases.size(); i++) {
+            GitHubReleaseClient.Release r = releases.get(i);
+            StringBuilder sb = new StringBuilder(r.tag);
+            if (r.latest) {
+                sb.append("  [最新]");
+            }
+            if (r.tag.equalsIgnoreCase(installed)) {
+                sb.append("  [当前已装]");
+            }
+            if (!r.name.isEmpty() && !r.name.equals(r.tag)) {
+                sb.append("\n").append(r.name);
+            }
+            if (r.size > 0) {
+                sb.append("  (").append(r.size / 1024).append(" KB)");
+            }
+            labels[i] = sb.toString();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("选择服务端版本（当前：" + (installed.isEmpty() ? "未知" : installed) + "）")
+                .setItems(labels, (d, which) -> {
+                    GitHubReleaseClient.Release chosen = releases.get(which);
+                    new AlertDialog.Builder(this)
+                            .setTitle("使用 " + chosen.tag + " ?")
+                            .setMessage("将下载 " + chosen.tag + " 覆盖服务端程序（public/）。"
+                                    + "\n你的业务数据（data/）不会丢失。"
+                                    + (chosen.tag.equalsIgnoreCase(installed)
+                                        ? "\n\n这是当前已装版本，仍会重新安装。"
+                                        : ""))
+                            .setPositiveButton("下载安装", (dd, ww) -> applyServerUpdate(chosen))
+                            .setNegativeButton("取消", null)
+                            .show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     /** 执行下载覆盖（后台线程 + 主线程进度提示）。 */
-    private void applyServerUpdate(GitLabReleaseClient.Release release) {
+    private void applyServerUpdate(GitHubReleaseClient.Release release) {
         updating = true;
         Toast.makeText(this, "正在下载更新包…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
