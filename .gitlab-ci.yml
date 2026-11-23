@@ -1,0 +1,157 @@
+# ==============================================================================
+# 报工服务器（baogong-server）CI/CD
+#
+# 环境说明（均为 JihuLab Runner 实测结论）：
+#   - Runner 为 docker+machine 执行器，标签 saas-linux-medium-amd64（4C/16G/50G）
+#   - 节点位于国内：maven.google.com 不可达，Gradle 依赖走镜像（settings.gradle）
+#   - gradle-wrapper 直连 GitHub 超时，改为镜像预下载（ci/setup-android-toolchain.sh）
+#   - 容器内无 unzip/python3，使用 JDK 自带 jar 解压
+#
+# 流水线结构：
+#   check      → PHP 语法检查（assets 内程序）+ APK 关键文件校验
+#   build      → assembleDebug / assembleRelease，产出 APK 与热更新 zip
+#   release    → 打 tag 时发布 GitLab Release 并挂载产物
+# ==============================================================================
+
+stages:
+  - check
+  - build
+  - release
+
+variables:
+  ANDROID_COMPILE_SDK: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  GRADLE_VERSION: "8.14.3"
+  # 依赖仓库走国内镜像，避免 maven.google.com 超时
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8"
+
+# ==============================================================================
+# 阶段一：检查
+# ==============================================================================
+
+# PHP 语法检查：assets 里的 PHP 是热更新的实际交付物，语法错误会直接影响线上
+php-syntax-check:
+  stage: check
+  image: php:8.5-cli
+  script:
+    - |
+      set -e
+      echo "==> 检查 PHP 文件语法"
+      fail=0
+      count=0
+      for f in $(find app/src/main/assets/baogong -name '*.php' | sort); do
+        count=$((count + 1))
+        if ! php -l "$f"; then
+          fail=1
+        fi
+      done
+      echo "==> 共检查 $count 个 PHP 文件"
+      if [ "$fail" -ne 0 ]; then
+        echo "!! 存在 PHP 语法错误"
+        exit 1
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# 工程结构校验：确认热更新必需的文件与 PHP 运行时都在位
+project-layout-check:
+  stage: check
+  image: eclipse-temurin:17-jdk
+  script:
+    - |
+      set -e
+      echo "==> 校验关键文件"
+      missing=0
+      for f in \
+        app/src/main/assets/baogong/public/api.php \
+        app/src/main/assets/baogong/public/app.js \
+        app/src/main/assets/baogong/public/index.html \
+        app/src/main/jniLibs/arm64-v8a/libphp_bin.so \
+        app/src/main/AndroidManifest.xml \
+        app/build.gradle \
+        build.gradle \
+        settings.gradle ; do
+        if [ -e "$f" ]; then
+          echo "  OK   $f"
+        else
+          echo "  MISS $f"
+          missing=1
+        fi
+      done
+      echo "==> 统计 PHP 运行时 .so 数量：$(ls app/src/main/jniLibs/arm64-v8a/*.so 2>/dev/null | wc -l)"
+      if [ "$missing" -ne 0 ]; then
+        echo "!! 关键文件缺失"
+        exit 1
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ==============================================================================
+# 阶段二：构建
+# ==============================================================================
+
+build-apk:
+  stage: build
+  tags:
+    - saas-linux-medium-amd64
+  image: eclipse-temurin:17-jdk
+  cache:
+    # Android SDK 与 Gradle 分发包体积大，缓存后单次构建可缩短数分钟
+    key: "android-toolchain-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .android-sdk/
+      - .gradle-dist/
+    policy: pull-push
+  script:
+    - bash ci/setup-android-toolchain.sh
+    - bash ci/prepare-signing.sh
+    - |
+      set -e
+      cd "$CI_PROJECT_DIR"
+      export ANDROID_HOME=$CI_PROJECT_DIR/.android-sdk
+      export ANDROID_SDK_ROOT=$ANDROID_HOME
+      export GRADLE_USER_HOME=$CI_PROJECT_DIR/.gradle-home
+      export PATH=$PATH:$CI_PROJECT_DIR/.gradle-dist/gradle-$GRADLE_VERSION/bin
+      echo "sdk.dir=$ANDROID_HOME" > local.properties
+      chmod +x gradlew
+      echo "==> 开始构建（debug + release）"
+      gradle --no-daemon assembleDebug assembleRelease
+    - bash ci/package-hotupdate.sh
+    - |
+      set -e
+      cd "$CI_PROJECT_DIR"
+      mkdir -p dist
+      for f in app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f" .apk)
+        version=$(sed -n 's/.*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -1)
+        cp "$f" "dist/baogong-server-${version}-${base}.apk"
+      done
+      echo "==> 产物清单："
+      ls -lh dist/
+  artifacts:
+    name: "baogong-server-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/
+    expire_in: 90 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ==============================================================================
+# 阶段三：发布（仅 tag 触发）
+# ==============================================================================
+
+publish-release:
+  stage: release
+  image: eclipse-temurin:17-jdk
+  needs:
+    - job: build-apk
+      artifacts: true
+  script:
+    - bash ci/publish-release.sh
+  rules:
+    - if: $CI_COMMIT_TAG

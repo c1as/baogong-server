@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 本机 WebView 通过 http://127.0.0.1 访问内置 PHP，需允许明文 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+    </domain-config>
+    <!-- 兼容部分 WebView 场景的明文访问 -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

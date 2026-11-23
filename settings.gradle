@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        // 优先使用国内镜像：CI Runner 内 maven.google.com 不可达，直连会长时间超时
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://mirrors.tencent.com/nexus/repository/maven-public/' }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    // 允许 init.gradle 注入国内镜像加速；同时保留官方仓库兜底
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        maven { url 'https://mirrors.tencent.com/nexus/repository/maven-public/' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "baogong-server"
+include ':app'

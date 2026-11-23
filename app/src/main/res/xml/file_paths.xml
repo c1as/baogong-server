@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="camera" path="camera/" />
+    <!-- 服务器运行目录（供 FileProvider 分享附件/备份） -->
+    <files-path name="bg_root" path="baogong/" />
+    <external-path name="external_download" path="Download/" />
+</paths>

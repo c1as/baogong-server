@@ -1,0 +1,32 @@
+# ===== 构建产物（体积巨大，不入库）=====
+.gradle/
+build/
+app/build/
+captures/
+
+# ===== 本地机器相关配置 =====
+local.properties
+
+# ===== 签名密钥与密码（安全！切勿提交）=====
+*.jks
+*.keystore
+keystore.properties
+
+# ===== GitLab 仓库热更新令牌（安全！切勿提交）=====
+updater_secrets.properties
+
+# ===== IDE / 系统文件 =====
+.idea/
+*.iml
+.DS_Store
+*.swp
+
+# ===== 交付产物（兜底）=====
+*.apk
+*.zip
+
+# ===== CI 工具链与临时目录（不入库）=====
+.android-sdk/
+.gradle-dist/
+.gradle-home/
+dist/
