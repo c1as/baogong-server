@@ -37,8 +37,8 @@ public final class RepoUpdater {
      *
      * @param release 查到的最新版本
      */
-    public static UpdateResult apply(Context c, GitLabReleaseClient.Release release,
-                                     GitLabReleaseClient.ProgressCallback cb) {
+    public static UpdateResult apply(Context c, GitHubReleaseClient.Release release,
+                                     GitHubReleaseClient.ProgressCallback cb) {
         File root = Config.root(c);
         File webRoot = new File(root, "public");
         File tmpDir = new File(root, "tmp");
@@ -51,7 +51,7 @@ public final class RepoUpdater {
                 tmpDir.mkdirs();
             }
             // 1. 下载
-            long size = GitLabReleaseClient.download(c, release.downloadUrl, zipFile, cb);
+            long size = GitHubReleaseClient.download(c, release.downloadUrl, zipFile, cb);
             if (size < 100) {
                 return fail("下载文件过小，疑似损坏（" + size + " 字节）");
             }
