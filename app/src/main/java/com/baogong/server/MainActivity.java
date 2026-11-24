@@ -56,15 +56,17 @@ import java.util.Locale;
  * 主界面：本机报工服务器控制台。
  *  - 首次启动把内置 web 程序解压到可写目录，然后启动后台服务（PHP）。
  *  - WebView 直接加载 http://127.0.0.1:8080 的本机应用。
- *  - 热更新：系统"文件"App 直接粘贴文件到 public/（DocumentsProvider），
- *    或用"导入文件"按钮选 php/zip 覆盖；菜单可查看状态、重启 PHP、导出日志。
+ *  - 热更新：菜单「导入文件（可多选）」/「导入整个文件夹」/「检查服务端更新(GitHub)」
+ *    三种方式覆盖 public/；DocumentsProvider 仍挂载供外部只读浏览。
+ *    菜单可查看状态、重启 PHP、导出日志。
  */
 public class MainActivity extends Activity implements ServerService.StateListener {
 
     private static final String PREFS = "bg_server";
     private static final int REQ_PICK = 1001;
     private static final int REQ_DL_PERM = 1002;
-    private static final int REQ_IMPORT = 1003; // 热更新导入文件
+    private static final int REQ_IMPORT = 1003;      // 热更新导入文件（可多选）
+    private static final int REQ_IMPORT_TREE = 1004; // 热更新导入整个文件夹
 
     private WebView webView;
     private SharedPreferences prefs;
@@ -109,25 +111,37 @@ public class MainActivity extends Activity implements ServerService.StateListene
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 
-    /** 打开系统文件选择器，选 php 文件或 zip 整包进行热更新。 */
+    /** 打开系统文件选择器，可多选 php/zip/js 等文件热更新（替代不可靠的文件管理器粘贴）。 */
     private void pickImportFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true); // 支持一次选多个文件
         try {
-            startActivityForResult(Intent.createChooser(intent, "选择要导入的 php 或 zip 文件"), REQ_IMPORT);
+            startActivityForResult(Intent.createChooser(intent, "选择要导入的文件（可多选，zip 会自动解压）"),
+                    REQ_IMPORT);
         } catch (ActivityNotFoundException e) {
             Toast.makeText(this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
         }
     }
 
-    /** 导入完成后的处理：提示结果并刷新 WebView。 */
-    private void handleImportResult(Uri uri) {
-        if (uri == null) {
-            return;
+    /** 打开系统目录选择器，整包导入一个文件夹（兼容小米等 ROM 无法粘贴目录的情况）。 */
+    private void pickImportFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        // 授予持久读权限，避免某些 ROM 回调后 Uri 失效
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(Intent.createChooser(intent, "选择要导入的文件夹（将覆盖 public/ 下同名文件）"),
+                    REQ_IMPORT_TREE);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "没有可用的文件夹选择器", Toast.LENGTH_SHORT).show();
         }
-        HotUpdateImporter.Result r = HotUpdateImporter.importToPublic(this, uri);
-        Toast.makeText(this, r.message, r.ok ? Toast.LENGTH_LONG : Toast.LENGTH_LONG).show();
+    }
+
+    /** 导入完成后的处理：提示结果并刷新 WebView。 */
+    private void handleImportResult(HotUpdateImporter.Result r) {
+        Toast.makeText(this, r.message, Toast.LENGTH_LONG).show();
         if (r.ok) {
             status("热更新成功：" + r.message + "\n正在重新加载页面…");
             webView.reload();
@@ -400,8 +414,41 @@ public class MainActivity extends Activity implements ServerService.StateListene
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQ_IMPORT) {
+            if (resultCode == RESULT_OK && data != null) {
+                final java.util.List<Uri> uris = new ArrayList<>();
+                ClipData clip = data.getClipData();
+                if (clip != null) {
+                    for (int i = 0; i < clip.getItemCount(); i++) {
+                        uris.add(clip.getItemAt(i).getUri());
+                    }
+                } else if (data.getData() != null) {
+                    uris.add(data.getData());
+                }
+                if (!uris.isEmpty()) {
+                    Toast.makeText(this, "正在导入 " + uris.size() + " 个文件…", Toast.LENGTH_SHORT).show();
+                    new Thread(() -> {
+                        final HotUpdateImporter.Result r = HotUpdateImporter.importMultiple(this, uris);
+                        uiHandler.post(() -> handleImportResult(r));
+                    }).start();
+                }
+            }
+            return;
+        }
+        if (requestCode == REQ_IMPORT_TREE) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
-                handleImportResult(data.getData());
+                Uri treeUri = data.getData();
+                // 持久化目录访问权限（部分 ROM 需要，拒绝也不影响本次导入）
+                try {
+                    getContentResolver().takePersistableUriPermission(treeUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Exception ignored) {
+                }
+                Toast.makeText(this, "正在导入文件夹…", Toast.LENGTH_SHORT).show();
+                new Thread(() -> {
+                    final HotUpdateImporter.Result r =
+                            HotUpdateImporter.importTree(this, treeUri, Config.webRoot(this));
+                    uiHandler.post(() -> handleImportResult(r));
+                }).start();
             }
             return;
         }
@@ -475,18 +522,20 @@ public class MainActivity extends Activity implements ServerService.StateListene
     private static final int MENU_HOTUPDATE_HELP = 6;
     private static final int MENU_EXPORT_LOG = 7;
     private static final int MENU_CHECK_UPDATE = 8;
+    private static final int MENU_IMPORT_FOLDER = 9;
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         // v2.1：原来顶部的所有操作 + 新增「设置」入口，全部收进右上角 ⋮ 菜单
         menu.add(0, MENU_SETTINGS, 0, "设置");
-        menu.add(0, MENU_IMPORT, 1, "导入文件更新");
-        menu.add(0, MENU_RESTART, 2, "重启 PHP 服务");
-        menu.add(0, MENU_RELOAD, 3, "重新加载页面");
-        menu.add(0, MENU_STATUS, 4, "服务器状态");
-        menu.add(0, MENU_HOTUPDATE_HELP, 5, "热更新说明");
-        menu.add(0, MENU_EXPORT_LOG, 6, "导出诊断日志");
-        menu.add(0, MENU_CHECK_UPDATE, 7, "检查服务端更新");
+        menu.add(0, MENU_IMPORT, 1, "导入文件（可多选）");
+        menu.add(0, MENU_IMPORT_FOLDER, 2, "导入整个文件夹");
+        menu.add(0, MENU_RESTART, 3, "重启 PHP 服务");
+        menu.add(0, MENU_RELOAD, 4, "重新加载页面");
+        menu.add(0, MENU_STATUS, 5, "服务器状态");
+        menu.add(0, MENU_HOTUPDATE_HELP, 6, "热更新说明");
+        menu.add(0, MENU_EXPORT_LOG, 7, "导出诊断日志");
+        menu.add(0, MENU_CHECK_UPDATE, 8, "检查服务端更新");
         return true;
     }
 
@@ -498,6 +547,9 @@ public class MainActivity extends Activity implements ServerService.StateListene
                 return true;
             case MENU_IMPORT:
                 pickImportFile();
+                return true;
+            case MENU_IMPORT_FOLDER:
+                pickImportFolder();
                 return true;
             case MENU_RESTART:
                 ServerService.start(this);
@@ -518,13 +570,14 @@ public class MainActivity extends Activity implements ServerService.StateListene
                 return true;
             case MENU_HOTUPDATE_HELP:
                 new AlertDialog.Builder(this).setTitle("如何热更新服务端")
-                        .setMessage("方式一（推荐）：打开手机自带的「文件」App，在侧边栏找到「报工服务器」，"
-                                + "进入 public/ 目录，把新版 api.php 等文件复制粘贴进来覆盖即可。\n\n"
-                                + "方式二：点右上角菜单「导入文件更新」，选择单个 php 文件或 zip 整包，"
-                                + "会自动覆盖到 public/。\n\n"
-                                + "完成后回到 App 刷新页面即可。PHP 每次请求重新加载脚本，改动立即生效，无需重装 APK。\n\n"
-                                + "提示：data/ 是数据库与图片，请勿随意删除；密码在 app.env 中设置。"
-                                + "若系统文件管理器侧边栏看不到「报工服务器」（部分小米机型会隐藏），请用方式二。")
+                        .setMessage("方式一 · 导入文件（推荐）：菜单「导入文件（可多选）」，一次选多个 php/js/css 文件，"
+                                + "或选 zip 整包，会自动覆盖到 public/。\n\n"
+                                + "方式二 · 导入文件夹：菜单「导入整个文件夹」，选中解压后的 public 文件夹，"
+                                + "里面所有内容按原目录结构覆盖到 public/（适合整包替换）。\n\n"
+                                + "方式三 · 检查服务端更新：从 GitHub 仓库拉取已发布的 web-v* 版本，可选任意版本。\n\n"
+                                + "完成后 App 会自动刷新页面。PHP 每次请求重新加载脚本，改动立即生效，无需重装 APK。\n\n"
+                                + "说明：小米等手机自带的文件管理器无法向「报工服务器」目录粘贴文件夹（系统限制），"
+                                + "请优先用上面的「导入文件/导入文件夹」。data/ 是数据库与图片，不会被覆盖。")
                         .setPositiveButton("知道了", null).show();
                 return true;
             case MENU_EXPORT_LOG:

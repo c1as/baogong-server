@@ -1,7 +1,9 @@
 package com.baogong.server.installer;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.net.Uri;
+import android.provider.DocumentsContract;
 
 import com.baogong.server.Config;
 
@@ -58,6 +60,151 @@ public final class HotUpdateImporter {
             }
         } catch (Exception e) {
             return new Result(false, "导入失败：" + e.getMessage(), 0);
+        }
+    }
+
+    /**
+     * 导入用户选中的多个文件（对应 ACTION_OPEN_DOCUMENT + EXTRA_ALLOW_MULTIPLE）。
+     * 每个文件按其自身规则处理：zip 解压、单文件放到 public/ 根。
+     * 汇总成功数与失败信息；只要有一个成功即返回 ok。
+     */
+    public static Result importMultiple(Context context, java.util.List<Uri> uris) {
+        if (uris == null || uris.isEmpty()) {
+            return new Result(false, "未选择任何文件", 0);
+        }
+        int okCount = 0;
+        int fileCount = 0;
+        StringBuilder fails = new StringBuilder();
+        for (Uri uri : uris) {
+            Result r = importToPublic(context, uri);
+            if (r.ok) {
+                okCount++;
+                fileCount += r.fileCount;
+            } else {
+                if (fails.length() > 0) {
+                    fails.append("；");
+                }
+                fails.append(r.message);
+            }
+        }
+        String msg = "成功导入 " + okCount + " 项（共 " + fileCount + " 个文件）";
+        if (fails.length() > 0) {
+            msg += "；失败：" + fails;
+        }
+        return new Result(okCount > 0, msg, fileCount);
+    }
+
+    /**
+     * 从 SAF 目录树 Uri 递归导入整个文件夹（对应 ACTION_OPEN_DOCUMENT_TREE）。
+     *
+     * 语义：把用户选中的文件夹当作“新的 public/ 根”——里面的文件按相对路径覆盖到 public/，
+     * 例如选中解压后的 public 文件夹，其内部 api.php → public/api.php，
+     * plugins/xxx/handler.php → public/plugins/xxx/handler.php。
+     *
+     * 同名直接覆盖（不是追加 (2)），符合“整包替换”的直觉。
+     * 安全：每个目标文件都做 canonical 越界校验，必须位于 webRoot 内；只写 public/，不碰 data/。
+     *
+     * @param treeUri   ACTION_OPEN_DOCUMENT_TREE 返回的目录树 Uri
+     * @param webRoot   目标根目录（Config.webRoot(context)）
+     */
+    public static Result importTree(Context context, Uri treeUri, File webRoot) {
+        if (treeUri == null) {
+            return new Result(false, "未选择文件夹", 0);
+        }
+        if (!webRoot.exists()) {
+            webRoot.mkdirs();
+        }
+        final String rootCanonical;
+        try {
+            rootCanonical = webRoot.getCanonicalPath();
+        } catch (IOException e) {
+            return new Result(false, "无法解析目标目录：" + e.getMessage(), 0);
+        }
+        final int[] counter = new int[]{0};
+        final int[] skipped = new int[]{0};
+        try {
+            String rootId = DocumentsContract.getTreeDocumentId(treeUri);
+            if (rootId == null) {
+                return new Result(false, "无法识别所选文件夹", 0);
+            }
+            walkTree(context, treeUri, rootId, webRoot, rootCanonical, counter, skipped);
+        } catch (Exception e) {
+            return new Result(false, "导入文件夹失败：" + e.getMessage(), counter[0]);
+        }
+        if (counter[0] == 0) {
+            return new Result(false, "所选文件夹内没有可导入的文件"
+                    + (skipped[0] > 0 ? "（" + skipped[0] + " 个被安全策略跳过）" : ""), 0);
+        }
+        String msg = "已从文件夹导入 " + counter[0] + " 个文件";
+        if (skipped[0] > 0) {
+            msg += "（" + skipped[0] + " 个越界/无效项已跳过）";
+        }
+        return new Result(true, msg, counter[0]);
+    }
+
+    /** 递归遍历 SAF 目录树，把内容按相对路径写入 destDir。 */
+    private static void walkTree(Context context, Uri treeUri, String parentDocId, File destDir,
+                                 String rootCanonical, int[] counter, int[] skipped) throws IOException {
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId);
+        String[] projection = new String[]{
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+        };
+        Cursor cursor = context.getContentResolver().query(childrenUri, projection, null, null, null);
+        if (cursor == null) {
+            return;
+        }
+        byte[] buf = new byte[16384];
+        try {
+            while (cursor.moveToNext()) {
+                String docId = cursor.getString(cursor.getColumnIndexOrThrow(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID));
+                String name = cursor.getString(cursor.getColumnIndexOrThrow(
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME));
+                String mime = cursor.getString(cursor.getColumnIndexOrThrow(
+                        DocumentsContract.Document.COLUMN_MIME_TYPE));
+                if (docId == null || name == null || name.startsWith(".")) {
+                    continue;
+                }
+                File target = new File(destDir, name);
+                // 越界校验：目标必须位于 webRoot 内，防止恶意 displayName 含 ../
+                String targetCanonical = target.getCanonicalPath();
+                if (!targetCanonical.equals(rootCanonical)
+                        && !targetCanonical.startsWith(rootCanonical + File.separator)) {
+                    skipped[0]++;
+                    continue;
+                }
+                boolean isDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
+                if (isDir) {
+                    if (!target.exists()) {
+                        target.mkdirs();
+                    }
+                    walkTree(context, treeUri, docId, target, rootCanonical, counter, skipped);
+                } else {
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.exists()) {
+                        parent.mkdirs();
+                    }
+                    Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                    InputStream in = context.getContentResolver().openInputStream(docUri);
+                    if (in == null) {
+                        skipped[0]++;
+                        continue;
+                    }
+                    try (OutputStream out = new FileOutputStream(target)) {
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                        }
+                    } finally {
+                        in.close();
+                    }
+                    counter[0]++;
+                }
+            }
+        } finally {
+            cursor.close();
         }
     }
 

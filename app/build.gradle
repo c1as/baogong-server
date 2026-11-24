@@ -17,8 +17,8 @@ android {
         applicationId "com.baogong.server"
         minSdk 24
         targetSdk 34
-        versionCode 12
-        versionName "2.4"
+        versionCode 13
+        versionName "2.5"
 
         // 只打 arm64-v8a（目标是 arm64 真机，php 运行时也仅编译了 aarch64）
         ndk {
