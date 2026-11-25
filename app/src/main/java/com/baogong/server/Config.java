@@ -62,7 +62,7 @@ public final class Config {
     public static final String BUNDLED_WEB_VERSION = "v2.5";
 
     /** APK 版本号（用于诊断日志）。 */
-    public static final String APP_VERSION = "2.5";
+    public static final String APP_VERSION = "2.6";
 
     private Config() {
     }

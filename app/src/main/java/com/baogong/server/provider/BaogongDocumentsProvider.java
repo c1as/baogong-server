@@ -176,6 +176,81 @@ public class BaogongDocumentsProvider extends DocumentsProvider {
         return docId(dest);
     }
 
+    /**
+     * 复制文件或整个目录树到目标目录（系统文件管理器「复制→粘贴」走这里）。
+     * 同名时追加 (2)(3)…，不覆盖已有文件；全程越界校验。
+     */
+    @Override
+    public String copyDocument(String sourceDocumentId, String targetParentDocumentId)
+            throws FileNotFoundException {
+        File src = file(sourceDocumentId);
+        File targetParent = file(targetParentDocumentId);
+        if (!targetParent.isDirectory()) {
+            throw new FileNotFoundException("目标不是目录: " + targetParentDocumentId);
+        }
+        File dest = uniqueChild(targetParent, src.getName());
+        try {
+            if (src.isDirectory()) {
+                copyRecursive(src, dest);
+            } else {
+                copyFile(src, dest);
+            }
+        } catch (IOException e) {
+            // 复制中途失败，清理已产生的半成品，避免残留
+            if (dest.exists()) {
+                deleteRecursive(dest);
+            }
+            throw new FileNotFoundException("复制失败: " + e.getMessage());
+        }
+        Log.i(TAG, "copyDocument: " + src + " -> " + dest);
+        return docId(dest);
+    }
+
+    /**
+     * 移动文件/目录到新父目录（系统文件管理器「剪切→粘贴」走这里）。
+     * 先尝试原子 renameTo；跨存储/失败时回退为「复制 + 删除」，保证语义一致。
+     * 不允许把目录移动进自身或其子目录（防止无限递归）。
+     */
+    @Override
+    public String moveDocument(String sourceDocumentId, String sourceParentDocumentId,
+                               String targetParentDocumentId) throws FileNotFoundException {
+        File src = file(sourceDocumentId);
+        File targetParent = file(targetParentDocumentId);
+        if (isRoot(src)) {
+            throw new FileNotFoundException("不能移动根目录");
+        }
+        if (!targetParent.isDirectory()) {
+            throw new FileNotFoundException("目标不是目录: " + targetParentDocumentId);
+        }
+        // 禁止把目录移动进自己或自己的子目录
+        if (src.isDirectory() && isWithin(src, targetParent)) {
+            throw new FileNotFoundException("不能把文件夹移动到它自己内部");
+        }
+        File dest = uniqueChild(targetParent, src.getName());
+        if (src.renameTo(dest)) {
+            Log.i(TAG, "moveDocument(rename): " + src + " -> " + dest);
+            return docId(dest);
+        }
+        // 回退：复制后删除源
+        try {
+            if (src.isDirectory()) {
+                copyRecursive(src, dest);
+            } else {
+                copyFile(src, dest);
+            }
+            if (!deleteRecursive(src)) {
+                throw new IOException("删除源失败");
+            }
+        } catch (IOException e) {
+            if (dest.exists()) {
+                deleteRecursive(dest);
+            }
+            throw new FileNotFoundException("移动失败: " + e.getMessage());
+        }
+        Log.i(TAG, "moveDocument(copy+delete): " + src + " -> " + dest);
+        return docId(dest);
+    }
+
     @Override
     public boolean isChildDocument(String parentDocumentId, String documentId) {
         try {
@@ -207,7 +282,8 @@ public class BaogongDocumentsProvider extends DocumentsProvider {
         }
         flags |= DocumentsContract.Document.FLAG_SUPPORTS_DELETE
                 | DocumentsContract.Document.FLAG_SUPPORTS_RENAME
-                | DocumentsContract.Document.FLAG_SUPPORTS_MOVE;
+                | DocumentsContract.Document.FLAG_SUPPORTS_MOVE
+                | DocumentsContract.Document.FLAG_SUPPORTS_COPY;
         row.add(DocumentsContract.Document.COLUMN_FLAGS, flags);
         row.add(DocumentsContract.Document.COLUMN_SIZE, dir ? 0 : file.length());
     }
@@ -282,6 +358,72 @@ public class BaogongDocumentsProvider extends DocumentsProvider {
                 return "application/pdf";
             default:
                 return "application/octet-stream";
+        }
+    }
+
+    /** 在父目录下生成不冲突的目标名（追加 (2)(3)…），不覆盖已有文件。 */
+    private File uniqueChild(File parent, String name) {
+        File target = new File(parent, name);
+        for (int i = 2; target.exists(); i++) {
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                target = new File(parent, name.substring(0, dot) + " (" + i + ")" + name.substring(dot));
+            } else {
+                target = new File(parent, name + " (" + i + ")");
+            }
+        }
+        return target;
+    }
+
+    /** 递归复制目录树。 */
+    private static void copyRecursive(File src, File destDir) throws IOException {
+        if (!destDir.mkdirs() && !destDir.isDirectory()) {
+            throw new IOException("无法创建目录: " + destDir);
+        }
+        File[] children = src.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                File out = new File(destDir, child.getName());
+                if (child.isDirectory()) {
+                    copyRecursive(child, out);
+                } else {
+                    copyFile(child, out);
+                }
+            }
+        }
+    }
+
+    /** 单文件字节复制。 */
+    private static void copyFile(File src, File dest) throws IOException {
+        java.io.InputStream in = null;
+        java.io.OutputStream out = null;
+        try {
+            in = new java.io.FileInputStream(src);
+            out = new java.io.FileOutputStream(dest);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        } finally {
+            if (in != null) {
+                try { in.close(); } catch (IOException ignored) {}
+            }
+            if (out != null) {
+                try { out.close(); } catch (IOException ignored) {}
+            }
+        }
+    }
+
+    /** ancestor 是否为 child 的自身或其祖先（用于阻止把目录移进自己内部）。 */
+    private static boolean isWithin(File ancestor, File child) {
+        try {
+            String a = ancestor.getCanonicalPath();
+            String c = child.getCanonicalPath();
+            return c.equals(a) || c.startsWith(a + File.separator);
+        } catch (IOException e) {
+            // 无法解析时保守拒绝移动，避免越界
+            return true;
         }
     }
 

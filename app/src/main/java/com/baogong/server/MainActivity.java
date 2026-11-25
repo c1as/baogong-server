@@ -523,6 +523,7 @@ public class MainActivity extends Activity implements ServerService.StateListene
     private static final int MENU_EXPORT_LOG = 7;
     private static final int MENU_CHECK_UPDATE = 8;
     private static final int MENU_IMPORT_FOLDER = 9;
+    private static final int MENU_FORCE_REFRESH = 10;
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
@@ -530,12 +531,13 @@ public class MainActivity extends Activity implements ServerService.StateListene
         menu.add(0, MENU_SETTINGS, 0, "设置");
         menu.add(0, MENU_IMPORT, 1, "导入文件（可多选）");
         menu.add(0, MENU_IMPORT_FOLDER, 2, "导入整个文件夹");
-        menu.add(0, MENU_RESTART, 3, "重启 PHP 服务");
-        menu.add(0, MENU_RELOAD, 4, "重新加载页面");
-        menu.add(0, MENU_STATUS, 5, "服务器状态");
-        menu.add(0, MENU_HOTUPDATE_HELP, 6, "热更新说明");
-        menu.add(0, MENU_EXPORT_LOG, 7, "导出诊断日志");
-        menu.add(0, MENU_CHECK_UPDATE, 8, "检查服务端更新");
+        menu.add(0, MENU_FORCE_REFRESH, 3, "强制刷新插件索引");
+        menu.add(0, MENU_RESTART, 4, "重启 PHP 服务");
+        menu.add(0, MENU_RELOAD, 5, "重新加载页面");
+        menu.add(0, MENU_STATUS, 6, "服务器状态");
+        menu.add(0, MENU_HOTUPDATE_HELP, 7, "热更新说明");
+        menu.add(0, MENU_EXPORT_LOG, 8, "导出诊断日志");
+        menu.add(0, MENU_CHECK_UPDATE, 9, "检查服务端更新");
         return true;
     }
 
@@ -561,6 +563,13 @@ public class MainActivity extends Activity implements ServerService.StateListene
             case MENU_RELOAD:
                 webView.reload();
                 return true;
+            case MENU_FORCE_REFRESH:
+                // 跳过本地缓存，强制重新拉取插件索引；函数由前端 app.js 暴露
+                Toast.makeText(this, "正在强制刷新插件索引", Toast.LENGTH_SHORT).show();
+                webView.evaluateJavascript(
+                        "(function(){if(typeof window.bgForceRefresh==='function'){window.bgForceRefresh();}"
+                                + "else{location.hash='#/market';}})();", null);
+                return true;
             case MENU_STATUS:
                 new AlertDialog.Builder(this).setTitle("服务器状态")
                         .setMessage("PHP：" + phpText()
@@ -575,6 +584,7 @@ public class MainActivity extends Activity implements ServerService.StateListene
                                 + "方式二 · 导入文件夹：菜单「导入整个文件夹」，选中解压后的 public 文件夹，"
                                 + "里面所有内容按原目录结构覆盖到 public/（适合整包替换）。\n\n"
                                 + "方式三 · 检查服务端更新：从 GitHub 仓库拉取已发布的 web-v* 版本，可选任意版本。\n\n"
+                                + "插件市场索引若显示过期，用菜单「强制刷新插件索引」跳过缓存重新拉取（从 GitHub 实时获取）。\n\n"
                                 + "完成后 App 会自动刷新页面。PHP 每次请求重新加载脚本，改动立即生效，无需重装 APK。\n\n"
                                 + "说明：小米等手机自带的文件管理器无法向「报工服务器」目录粘贴文件夹（系统限制），"
                                 + "请优先用上面的「导入文件/导入文件夹」。data/ 是数据库与图片，不会被覆盖。")
